@@ -78,74 +78,87 @@
   // 1) 优先找带明显 “You/你” 的消息容器（aria/label）
   // 2) 再找看起来像“对话气泡”的块，过滤掉模型输出
   function findUserMessageNodesGemini() {
-  // 1) 找到输入框（Gemini 页面最稳定的锚点之一）
+  // 1) 更可靠地找输入框（Gemini 可能是 textarea 或 contenteditable）
   const composer =
-    document.querySelector('textarea') ||
-    document.querySelector('input[type="text"]');
+    document.querySelector("textarea") ||
+    document.querySelector('[contenteditable="true"]') ||
+    document.querySelector('div[role="textbox"]');
 
-  // 2) 以输入框为基准，向上找到“对话主区域”
-  //    main 通常包含对话内容；再过滤掉导航/侧栏区域
-  const main = composer ? composer.closest("main") : document.querySelector("main");
-  if (!main) return [];
+  // 2) 找“对话根容器”：从输入框往上找最近的可滚动大容器
+  //    如果找不到输入框，则退化为 document.body
+  const start = composer || document.body;
 
-  // 3) 排除明显不是对话的区域（历史列表/导航）
-  const isInNonChatArea = (node) => {
-    return Boolean(
-      node.closest("nav, aside, header, footer, [role='navigation'], [aria-label*='History'], [aria-label*='history']")
-    );
-  };
-
-  // 4) 在 main 内找“像消息块”的容器：优先 role=listitem/article
-  //    Gemini 的 DOM 会变，这里做多 selector 兜底
-  const selectors = [
-    "[role='listitem']",
-    "[role='article']",
-    "article",
-    "section"
-  ];
-
-  let blocks = [];
-  for (const sel of selectors) {
-    blocks = blocks.concat(Array.from(main.querySelectorAll(sel)));
+  function isScrollable(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    const style = getComputedStyle(el);
+    const overflowY = style.overflowY;
+    const canScroll = (overflowY === "auto" || overflowY === "scroll");
+    return canScroll && el.scrollHeight > el.clientHeight + 50;
   }
-  blocks = Array.from(new Set(blocks));
 
-  // 5) 过滤：去掉历史列表、按钮区、空内容、过短/过长、包含大量链接的块
-  const cleaned = blocks.filter((n) => {
+  let chatRoot = null;
+  let p = start;
+  for (let i = 0; i < 10 && p; i++) {
+    if (isScrollable(p)) { chatRoot = p; break; }
+    p = p.parentElement;
+  }
+  // 兜底：Gemini 常见会有 main；但没有也不致命
+  if (!chatRoot) chatRoot = document.querySelector("main") || document.body;
+
+  // 3) 排除明显的非对话区域（侧栏/导航/顶部栏）
+  const inNonChatArea = (node) =>
+    Boolean(node.closest("nav, aside, header, footer, [role='navigation']"));
+
+  // 4) 在对话根容器里抓“文本块候选”
+  //    注意：不要只依赖 role=listitem，Gemini 经常没有
+  const all = Array.from(chatRoot.querySelectorAll("article, section, div"));
+
+  // 5) 过滤出“像消息”的块
+  const candidates = all.filter((n) => {
     if (!(n instanceof HTMLElement)) return false;
-    if (isInNonChatArea(n)) return false;
+    if (inNonChatArea(n)) return false;
 
     const t = (n.innerText || "").trim();
     if (!t) return false;
 
-    // 排除“聊天标题列表”常见特征：通常是单行短文本 + 很多链接/按钮
+    // 长度：太短像按钮/菜单；太长像整页容器
+    if (t.length < 8) return false;
+    if (t.length > 1500) return false;
+
+    // 排除明显 UI 文案区域（比之前更少、更保守，避免误杀）
+    const bad = ["Settings", "Help", "Feedback", "New chat", "历史记录", "设置"];
+    if (bad.some((h) => t === h)) return false;
+
+    // 排除“历史列表”特征：短文本 + 大量链接/按钮
     const links = n.querySelectorAll("a[href]").length;
     const buttons = n.querySelectorAll("button").length;
-    if (links >= 2 && t.length < 200) return false;
-    if (buttons >= 3 && t.length < 200) return false;
-
-    // 排除明显是 UI 文案/控件附近文本
-    const badHints = ["New chat", "History", "设置", "Settings", "Help", "Feedback", "Share", "复制", "Copy"];
-    if (badHints.some((h) => t.includes(h))) return false;
-
-    // 长度阈值：避免把整页正文/菜单抓进来
-    if (t.length < 6) return false;
-    if (t.length > 2000) return false;
+    if (t.length < 200 && (links >= 2 || buttons >= 4)) return false;
 
     return true;
   });
 
-  // 6) 去重：去掉被父节点完全覆盖的重复项
-  const finalList = cleaned.filter((n) => {
-    const p = n.parentElement;
-    if (!p) return true;
-    const t = (n.innerText || "").trim();
-    const pt = (p.innerText || "").trim();
-    return pt !== t;
+  // 6) 去重：只保留“最小可用块”（避免父容器把子块都包进去）
+  //    规则：如果一个节点包含另一个节点且文本几乎相同，保留更小的那个
+  const uniq = Array.from(new Set(candidates));
+
+  const finalList = uniq.filter((n) => {
+    const t = n.innerText.trim();
+    // 如果存在子节点文本也差不多，说明它太大，丢掉
+    for (const child of uniq) {
+      if (child === n) continue;
+      if (n.contains(child)) {
+        const ct = child.innerText.trim();
+        if (ct && ct.length >= 8 && Math.abs(ct.length - t.length) < 20) {
+          return false;
+        }
+      }
+    }
+    return true;
   });
 
   return finalList;
 }
+
 
 
   function findUserMessageNodes() {
