@@ -1,8 +1,8 @@
 #cqn-panel {
   position: fixed;
   top: 88px;
-  right: 16px;
-  width: 280px;
+  right: 6px;
+  width: 210px;
   max-height: calc(100vh - 120px);
   background: rgba(20, 20, 20, 0.92);
   color: #fff;
