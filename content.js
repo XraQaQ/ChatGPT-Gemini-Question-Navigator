@@ -78,74 +78,75 @@
   // 1) 优先找带明显 “You/你” 的消息容器（aria/label）
   // 2) 再找看起来像“对话气泡”的块，过滤掉模型输出
   function findUserMessageNodesGemini() {
-    const candidates = [];
+  // 1) 找到输入框（Gemini 页面最稳定的锚点之一）
+  const composer =
+    document.querySelector('textarea') ||
+    document.querySelector('input[type="text"]');
 
-    // 策略 A：常见可访问性标记（不同版本可能有）
-    const a11ySelectors = [
-      '[aria-label="You"]',
-      '[aria-label="you"]',
-      '[aria-label="User"]',
-      '[aria-label="user"]',
-      '[aria-label="你"]',
-      '[data-author="user"]',
-      '[data-sender="user"]'
-    ];
-    a11ySelectors.forEach(sel => {
-      document.querySelectorAll(sel).forEach(n => {
-        // 有些节点只是 label，不包含正文，尝试上探到更大的容器
-        const container = n.closest('article, [role="article"], [role="listitem"], div');
-        if (container) candidates.push(container);
-      });
-    });
+  // 2) 以输入框为基准，向上找到“对话主区域”
+  //    main 通常包含对话内容；再过滤掉导航/侧栏区域
+  const main = composer ? composer.closest("main") : document.querySelector("main");
+  if (!main) return [];
 
-    // 策略 B：在对话区域里找“更像用户输入”的块（启发式）
-    // 重点：用户消息通常更短，且不包含“Gemini/模型”提示按钮区
-    const possibleBubbles = Array.from(document.querySelectorAll('main *'))
-      .filter(n => n instanceof HTMLElement)
-      .filter(n => {
-        const t = (n.innerText || "").trim();
-        if (!t) return false;
-        if (t.length < 2) return false;
-        if (t.length > 800) return false; // 用户提问一般不至于超长（兜底）
-        // 避免把页面菜单/按钮当作消息
-        const tag = n.tagName.toLowerCase();
-        if (["button", "input", "textarea", "nav"].includes(tag)) return false;
-        return true;
-      });
+  // 3) 排除明显不是对话的区域（历史列表/导航）
+  const isInNonChatArea = (node) => {
+    return Boolean(
+      node.closest("nav, aside, header, footer, [role='navigation'], [aria-label*='History'], [aria-label*='history']")
+    );
+  };
 
-    // 进一步挑选“像消息”的容器：优先有换行/段落的块
-    for (const n of possibleBubbles) {
-      // 只收集较大的文本块（减少噪音）
-      const t = n.innerText.trim();
-      if (t.length < 10) continue;
+  // 4) 在 main 内找“像消息块”的容器：优先 role=listitem/article
+  //    Gemini 的 DOM 会变，这里做多 selector 兜底
+  const selectors = [
+    "[role='listitem']",
+    "[role='article']",
+    "article",
+    "section"
+  ];
 
-      // Gemini 输出经常包含“复制/赞/踩/分享”等控件附近文本，尽量排除
-      const badHints = ["复制", "Copy", "分享", "Share", "赞", "踩", "Regenerate", "重新生成"];
-      if (badHints.some(h => t.includes(h))) continue;
-
-      // 倾向选择块级容器（减少选到单个 span）
-      const isBlockish = ["div", "article", "section", "mat-card"].includes(n.tagName.toLowerCase());
-      if (!isBlockish) continue;
-
-      candidates.push(n);
-    }
-
-    // 去重 + 过滤：只保留“看起来不像嵌套子节点”的（移除完全包含关系里更小的）
-    const uniq = Array.from(new Set(candidates)).filter(n => n.innerText && n.innerText.trim().length > 0);
-
-    // 移除被更大节点完全包住且文本相同的子节点，减少重复
-    const cleaned = uniq.filter(n => {
-      const t = n.innerText.trim();
-      const parent = n.parentElement;
-      if (!parent) return true;
-      const pt = (parent.innerText || "").trim();
-      return pt !== t; // 如果父节点文本完全相同，优先父节点，丢掉子节点
-    });
-
-    // 最后再限制到“主内容区”附近（如果能找到 main）
-    const main = document.querySelector("main");
-    return main ? cleaned.filter(n => main.contains(n)) : cleaned;
+  let blocks = [];
+  for (const sel of selectors) {
+    blocks = blocks.concat(Array.from(main.querySelectorAll(sel)));
   }
+  blocks = Array.from(new Set(blocks));
+
+  // 5) 过滤：去掉历史列表、按钮区、空内容、过短/过长、包含大量链接的块
+  const cleaned = blocks.filter((n) => {
+    if (!(n instanceof HTMLElement)) return false;
+    if (isInNonChatArea(n)) return false;
+
+    const t = (n.innerText || "").trim();
+    if (!t) return false;
+
+    // 排除“聊天标题列表”常见特征：通常是单行短文本 + 很多链接/按钮
+    const links = n.querySelectorAll("a[href]").length;
+    const buttons = n.querySelectorAll("button").length;
+    if (links >= 2 && t.length < 200) return false;
+    if (buttons >= 3 && t.length < 200) return false;
+
+    // 排除明显是 UI 文案/控件附近文本
+    const badHints = ["New chat", "History", "设置", "Settings", "Help", "Feedback", "Share", "复制", "Copy"];
+    if (badHints.some((h) => t.includes(h))) return false;
+
+    // 长度阈值：避免把整页正文/菜单抓进来
+    if (t.length < 6) return false;
+    if (t.length > 2000) return false;
+
+    return true;
+  });
+
+  // 6) 去重：去掉被父节点完全覆盖的重复项
+  const finalList = cleaned.filter((n) => {
+    const p = n.parentElement;
+    if (!p) return true;
+    const t = (n.innerText || "").trim();
+    const pt = (p.innerText || "").trim();
+    return pt !== t;
+  });
+
+  return finalList;
+}
+
 
   function findUserMessageNodes() {
     const s = site();
