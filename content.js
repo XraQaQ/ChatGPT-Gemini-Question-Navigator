@@ -80,116 +80,96 @@
   function findUserMessageNodesGemini() {
   const main = document.querySelector("main") || document.body;
 
+  // 1) 找输入框容器（用于排除 Tools/Fast 等输入区 UI 文本）
   const composer =
     document.querySelector("textarea") ||
     document.querySelector('[contenteditable="true"]') ||
     document.querySelector('div[role="textbox"]');
 
-  // 1) 更强的“模型回复块”识别：从反馈按钮往上找能包含正文的祖先
+  const composerContainer =
+    (composer && (composer.closest("form") || composer.closest("footer") || composer.closest("div"))) || null;
+
+  // 帮助函数：是否在输入区
+  const inComposer = (node) => composerContainer && composerContainer.contains(node);
+
+  // 2) 识别 assistant 回复块（你这套 Gemini UI 的按钮可能没 aria-label，所以加 Material icon 兜底）
+  // 2.1 aria-label 版
   const feedbackBtns = Array.from(
     main.querySelectorAll(
       "button[aria-label*='Like'],button[aria-label*='Dislike'],button[aria-label*='赞'],button[aria-label*='踩'],button[aria-label*='Copy'],button[aria-label*='复制']"
     )
   );
 
-  function pickAssistantBlock(btn) {
-    let cur = btn;
-    for (let i = 0; i < 12 && cur; i++) {
-      const el = cur instanceof HTMLElement ? cur : cur.parentElement;
-      if (!el) break;
-
-      const t = (el.innerText || "").trim();
-      // 这几个条件的目的：祖先块要“像一条完整回复”，而不是按钮工具条
-      const hasSomeText = t.length >= 20;
-      const notTooHuge = t.length <= 8000;
-      const hasNotOnlyUI = !/^(\s*(Like|Dislike|Copy|分享|复制|赞|踩|更多|More)\s*)+$/i.test(t);
-      const containsBtn = el.querySelector("button") !== null;
-
-      if (hasSomeText && notTooHuge && hasNotOnlyUI && containsBtn) {
-        // 再确保它确实包含这个反馈按钮
-        if (el.contains(btn)) return el;
-      }
-      cur = el.parentElement;
-    }
-    return btn.closest("[role='listitem'], article, section, div") || btn.parentElement;
-  }
+  // 2.2 Material Icons 版（常见：<mat-icon>thumb_up</mat-icon>）
+  const thumbIcons = Array.from(
+    main.querySelectorAll("mat-icon, span, i")
+  ).filter((n) => {
+    const t = (n.textContent || "").trim();
+    return t === "thumb_up" || t === "thumb_down" || t === "content_copy";
+  });
 
   const assistantBlocks = new Set();
-  for (const b of feedbackBtns) {
-    const block = pickAssistantBlock(b);
+
+  function addAssistantBlockFromNode(n) {
+    const block =
+      n.closest("[role='listitem']") ||
+      n.closest("article") ||
+      n.closest("section") ||
+      n.closest("div");
     if (block) assistantBlocks.add(block);
   }
 
-  // 2) 限定搜索范围：尽量在“对话正文区域”里找，减少抓到 header / sidebar
-  //    找一个同时包含：至少一个 assistantBlock 且靠近输入框 的容器
-  let scope = null;
-  const firstAssistant = assistantBlocks.values().next().value;
+  feedbackBtns.forEach(addAssistantBlockFromNode);
+  thumbIcons.forEach(addAssistantBlockFromNode);
 
-  if (firstAssistant) {
-    let cur = firstAssistant;
-    for (let i = 0; i < 10 && cur; i++) {
-      const el = cur instanceof HTMLElement ? cur : cur.parentElement;
-      if (!el) break;
-
-      const hasAssistant = el.querySelector(
-        "button[aria-label*='Like'],button[aria-label*='Dislike'],button[aria-label*='赞'],button[aria-label*='踩']"
-      );
-      const hasComposer = composer ? el.contains(composer) : true;
-
-      // 选一个“像正文区”的：包含回复按钮、并且尽量不要把整个 header/sidebar 包进来
-      if (hasAssistant && hasComposer) {
-        scope = el;
-        break;
-      }
-      cur = el.parentElement;
-    }
-  }
-  if (!scope) scope = main;
-
-  // 3) 强排除区域：header/nav/aside/footer
+  // 3) 用户消息候选：限制在 main 内，且不在 nav/aside/header/footer，也不在 composer
   const inNonChatArea = (node) =>
     Boolean(node.closest("nav, aside, header, footer, [role='navigation']"));
 
-  // 4) 用户消息候选：短文本、独立、且不在 assistantBlocks 内
-  const candidates = Array.from(scope.querySelectorAll("div, p, span"))
+  // 你截图里用户消息是右上角“短气泡”，所以先找短文本“叶子节点”
+  const candidates = Array.from(main.querySelectorAll("div, p, span"))
     .filter((n) => n instanceof HTMLElement)
-    .filter((n) => !inNonChatArea(n));
+    .filter((n) => !inNonChatArea(n))
+    .filter((n) => !inComposer(n));
 
   const userNodes = candidates.filter((n) => {
     const t = (n.innerText || "").trim();
     if (!t) return false;
 
-    // ---- 关键排除：UI/无关文本 ----
-    // PRO、免责声明、按钮文案等
-    if (t === "PRO") return false;
-    if (t.includes("Gemini can make mistakes") || t.includes("double-check it")) return false;
-    if (t.includes("Settings") || t.includes("Help") || t.includes("Feedback")) return false;
+    // 排除明显 UI 文本（你截图里就是 Tools / Fast）
+    const uiBadExact = new Set(["Tools", "Fast", "PRO"]);
+    if (uiBadExact.has(t)) return false;
 
-    // 长度：用户输入通常不太长（你截图里是短气泡）
+    // 排除免责声明
+    if (t.includes("Gemini can make mistakes") || t.includes("double-check it")) return false;
+
+    // 长度：用户输入通常较短
     if (t.length < 2 || t.length > 300) return false;
 
-    // 不是“工具区/列表项”：含大量按钮/链接的一律排除
+    // 含过多按钮/链接的不是气泡
     if (n.querySelectorAll("button").length >= 2) return false;
     if (n.querySelectorAll("a[href]").length >= 1) return false;
 
-    // ---- 排除模型回复：如果在任意 assistantBlocks 里就不要 ----
+    // 如果落在 assistant 回复块内，排除（把 Gemini 回复过滤掉）
     for (const ab of assistantBlocks) {
       if (ab && ab.contains(n)) return false;
     }
 
-    // ---- 去掉重复：只保留更“叶子”的节点 ----
+    // 去掉重复：如果父节点文本完全相同，优先父节点（或叶子），这里保留更叶子的
     const parent = n.parentElement;
     if (parent) {
       const pt = (parent.innerText || "").trim();
-      if (pt === t && parent.querySelectorAll("div, p, span").length <= 3) return false;
+      if (pt === t && parent.querySelectorAll("div, p, span").length <= 4) {
+        return false;
+      }
     }
 
     return true;
   });
 
-  // 5) 去重
   return Array.from(new Set(userNodes));
 }
+
 
 
 
